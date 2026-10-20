@@ -8,7 +8,8 @@ minimal reproduction that **does not require sharing a live malware sample**.
 
 ## Scope
 
-In scope: the analysis pipeline, isolation configuration, content guard, preprocessor,
+In scope: the analysis pipeline, the analyzer container configuration (Dockerfile,
+compose file, seccomp profile, `--isolate docker` flags), content guard, preprocessor,
 and report builder.
 
 Out of scope: vulnerabilities in third-party dependencies (report those upstream), and

@@ -17,6 +17,13 @@ to any report you share. `samples/` and `reports/` are gitignored and a pre-comm
 blocks sample commits. When reporting an issue, use a hash and a description, or a
 synthetic reproduction, never a live sample.
 
+## Static parsing on the host
+
+By default MalSift parses samples directly on the analysis host. Use `--isolate docker`
+for untrusted samples: parsing then happens in a network-less, read-only, capability-free
+container with a seccomp allowlist. A container shares the host kernel; it is a
+boundary for *parsing* hostile files, not for executing them.
+
 ## Detonation safety
 
 The dynamic tier is a documented stub. If you complete it:

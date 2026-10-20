@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "malsift"
-version = "0.2.0"
+version = "0.3.0"
 description = "Self-hosted malware triage that pairs classic static analysis with a local LLM, and quarantines adversarial prompt-injection bait embedded in samples."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -17,6 +17,7 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Security",
 ]
 dependencies = [
@@ -31,6 +32,9 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",
+    # used by tests/test_packaging.py to build a wheel and check its package data
+    "setuptools>=68",
+    "wheel",
 ]
 
 [project.scripts]
@@ -38,6 +42,15 @@ malsift = "malsift.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["malsift*"]
+
+# Runtime data ships inside the package so a plain (non-editable) `pip install .` works.
+[tool.setuptools.package-data]
+malsift = [
+    "data/config/*.yaml",
+    "data/prompts/*.txt",
+    "data/rules/*.yar",
+    "data/seccomp/*.json",
+]
 
 [tool.ruff]
 line-length = 100
