@@ -1,0 +1,24 @@
+# Virtual environments
+.venv/
+venv/
+
+# MalSift outputs and samples (never commit live samples)
+reports/
+samples/*
+!samples/.gitkeep
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Local config overrides
+config/local.yaml

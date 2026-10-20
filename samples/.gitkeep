@@ -1,0 +1,2 @@
+# Place samples here for local analysis. This directory is gitignored.
+# NEVER commit live malware. Only this .gitkeep is tracked.

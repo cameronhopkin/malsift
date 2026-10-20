@@ -1,0 +1,22 @@
+# MalSift default configuration. Copy to local.yaml to override without touching this file.
+
+llm:
+  endpoint: "http://127.0.0.1:11434/v1"   # local Ollama by default
+  model: "qwen3-coder"
+  api_key: "not-needed-for-local"
+  timeout_s: 120
+  max_tokens: 1024
+  temperature: 0.1
+
+static:
+  string_min_len: 5
+  max_strings: 2000
+  entropy_block: 256
+  high_entropy_cutoff: 7.2
+
+guard:
+  neutralize_injection: true
+  enable_hard_quarantine: true
+
+report:
+  out_dir: "reports"
