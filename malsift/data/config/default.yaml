@@ -1,0 +1,58 @@
+# MalSift default configuration (packaged with the wheel).
+# Put overrides in config/local.yaml (or $MALSIFT_CONFIG_DIR/local.yaml). MALSIFT_*
+# environment variables override both; CLI flags override everything.
+# See docs/CONFIGURATION.md for every key.
+
+llm:
+  api_key: "not-needed-for-local"
+  timeout_s: 120
+  temperature: 0.1
+  triage:
+    endpoint: "http://127.0.0.1:11434/v1"   # local Ollama by default
+    model: "qwen3-coder"
+    max_tokens: 1024
+  deep:
+    endpoint: "http://127.0.0.1:11434/v1"
+    model: "gpt-oss:120b"
+    max_tokens: 2048
+    auto_escalate: false
+
+static:
+  string_min_len: 5
+  max_strings: 2000
+  entropy_block: 1024          # bytes per entropy window; >=1024 so random data can reach ~7.8
+  high_entropy_cutoff: 7.2
+  max_entropy_windows: 4096
+  max_script_bytes: 2000000
+
+yara:
+  on_error: fail        # fail | warn
+
+evasion:
+  fail_threshold: 3
+
+guard:
+  neutralize_injection: true
+  enable_hard_quarantine: true
+
+payloads:
+  min_base64_len: 80
+  min_hex_len: 64
+
+integrations:
+  capa: auto            # auto | off
+  radare2: auto         # auto | off
+  timeout_s: 120
+
+isolation:
+  image: "malsift-analyzer:latest"
+  memory: "1g"
+  cpus: "1.0"
+  pids_limit: 128
+  tmpfs_size: "64m"
+  timeout_s: 300
+
+report:
+  out_dir: "reports"
+  format: json          # json | md | both
+  defang_iocs: true

@@ -7,9 +7,12 @@ padded decoys meant to trip content policies so the model refuses and triage sta
 The guard keys on the *structure* of such injections, never on subject matter. There is no
 dictionary of sensitive topics in this repo and there must never be one. Two outcomes:
 
-  - NEUTRALIZE: injection-shaped region replaced with a metadata-only marker so the
+Guarding is per item: each extracted string, or each line of a script, is judged on its
+own so one planted string cannot hide its neighbours.
+
+  - NEUTRALIZE: injection-shaped item replaced with a metadata-only marker so the
     pipeline keeps moving. The raw content is never forwarded to the model or the report.
-  - QUARANTINE: if a host-supplied high-risk classifier flags a region, it is recorded as
+  - QUARANTINE: if a host-supplied high-risk classifier flags an item, it is recorded as
     a hash + reason only. The content itself is never surfaced.
 
 A deployer wires in their own classifier via register_classifier(). None ships here.
@@ -35,7 +38,7 @@ _INJECTION_SIGNATURES = [
     re.compile(r"(?i)refuse\s+to\s+(?:analyze|answer|help)"),
 ]
 
-# A region is "suspicious" if it trips >=1 signature; score is the count.
+# An item is "suspicious" if it trips >=1 signature; score is the count.
 _HighRiskClassifier = Callable[[str], "tuple[bool, str] | None"]
 _classifiers: list[_HighRiskClassifier] = []
 
@@ -90,33 +93,70 @@ def _run_classifiers(region: str) -> tuple[bool, str] | None:
     return None
 
 
+def _guard_item(
+    item: str, span: tuple[int, int], *, neutralize: bool, hard_quarantine: bool
+) -> tuple[str, GuardMarker | None]:
+    """Guard one unit (a single extracted string, or a single line of script text)."""
+    if not item.strip():
+        return item, None
+    digest = hashlib.sha256(item.encode("utf-8", "ignore")).hexdigest()
+
+    quarantine = _run_classifiers(item) if hard_quarantine else None
+    if quarantine:
+        marker = GuardMarker("quarantined", digest, quarantine[1], span)
+        return f"[quarantined item sha256={digest[:16]} reason={quarantine[1]}]", marker
+
+    score = _injection_score(item)
+    if score and neutralize:
+        marker = GuardMarker("neutralized", digest, f"injection_signatures={score}", span)
+        return f"[neutralized injection-shaped item sha256={digest[:16]}]", marker
+
+    return item, None
+
+
+def scan_strings(
+    strings: list[str], *, neutralize: bool = True, hard_quarantine: bool = True
+) -> tuple[list[str], list[GuardMarker]]:
+    """Guard a list of extracted strings, evaluating EACH string on its own.
+
+    Strings pulled out of a binary are independent artifacts. Joining them and guarding
+    the blob lets one planted string take every neighbouring indicator down with it, which
+    is exactly the stall attack the guard exists to stop. Only the offending string is
+    replaced; the span is the string's index in the input list.
+    """
+    out: list[str] = []
+    markers: list[GuardMarker] = []
+    for idx, s in enumerate(strings):
+        text, marker = _guard_item(
+            s, (idx, idx + 1), neutralize=neutralize, hard_quarantine=hard_quarantine
+        )
+        out.append(text)
+        if marker:
+            markers.append(marker)
+    return out, markers
+
+
 def scan(text: str, *, neutralize: bool = True, hard_quarantine: bool = True) -> GuardResult:
-    """Scan text region-by-region (split on blank lines) and guard suspicious regions."""
+    """Guard free text (e.g. a script view) line by line.
+
+    Each line is evaluated independently, so a planted line is neutralized without
+    taking the surrounding code or indicators with it. Spans are character offsets.
+    """
     markers: list[GuardMarker] = []
     out_parts: list[str] = []
-
-    # Split into regions but keep offsets for marker spans.
-    for match in re.finditer(r".*?(?:\n\s*\n|\Z)", text, re.DOTALL):
-        region = match.group()
-        if not region:
+    for match in re.finditer(r"[^\n]*(?:\n|\Z)", text):
+        line = match.group()
+        if not line:
             continue
-        start, end = match.start(), match.end()
-        digest = hashlib.sha256(region.encode("utf-8", "ignore")).hexdigest()
-
-        quarantine = _run_classifiers(region) if hard_quarantine else None
-        if quarantine:
-            markers.append(GuardMarker("quarantined", digest, quarantine[1], (start, end)))
-            out_parts.append(f"[quarantined region sha256={digest[:16]} reason={quarantine[1]}]")
-            continue
-
-        score = _injection_score(region)
-        if score and neutralize:
-            markers.append(
-                GuardMarker("neutralized", digest, f"injection_signatures={score}", (start, end))
-            )
-            out_parts.append(f"[neutralized injection-shaped region sha256={digest[:16]}]")
-            continue
-
-        out_parts.append(region)
-
+        body = line[:-1] if line.endswith("\n") else line
+        nl = "\n" if line.endswith("\n") else ""
+        guarded, marker = _guard_item(
+            body,
+            (match.start(), match.start() + len(body)),
+            neutralize=neutralize,
+            hard_quarantine=hard_quarantine,
+        )
+        out_parts.append(guarded + nl)
+        if marker:
+            markers.append(marker)
     return GuardResult(text="".join(out_parts), markers=markers)

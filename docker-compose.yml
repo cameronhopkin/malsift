@@ -1,0 +1,39 @@
+# Hardened static-analysis service. Equivalent to `malsift analyze <file> --isolate docker`
+# (which builds the same `docker run` flags) but usable directly:
+#
+#   docker compose build analyzer
+#   SAMPLE=suspect.bin docker compose run --rm analyzer > extraction.json
+#
+# The container prints the extraction JSON (static facts, IOCs, sanitized script view) to
+# stdout. It has no network, so the LLM step always runs on the host.
+services:
+  analyzer:
+    build:
+      context: .
+      dockerfile: Dockerfile.analyzer
+    image: malsift-analyzer:latest
+    command: ["extract", "/samples/${SAMPLE:?set SAMPLE to a file name inside ./samples}"]
+    network_mode: none
+    read_only: true
+    user: "10001:10001"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+      - seccomp=./malsift/data/seccomp/analyzer.json
+    ipc: none
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    mem_limit: 1g
+    memswap_limit: 1g
+    cpus: 1.0
+    pids_limit: 128
+    ulimits:
+      nofile:
+        soft: 256
+        hard: 256
+    volumes:
+      - type: bind
+        source: ./samples
+        target: /samples
+        read_only: true

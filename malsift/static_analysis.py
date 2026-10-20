@@ -46,6 +46,20 @@ class StaticResult:
     strings: list[str] = field(default_factory=list)
     pe: dict[str, Any] | None = None
     yara_matches: list[str] = field(default_factory=list)
+    yara_details: list[dict[str, Any]] = field(default_factory=list)
+    yara_errors: list[str] = field(default_factory=list)
+    high_entropy_cutoff: float = 7.2
+    entropy_block: int = 1024
+    entropy_windows_truncated: bool = False
+
+    @property
+    def high_entropy(self) -> bool:
+        return self.entropy >= self.high_entropy_cutoff
+
+    def high_entropy_regions(self) -> list[dict[str, Any]]:
+        return high_entropy_regions(
+            self.entropy_windows, self.entropy_block, self.high_entropy_cutoff, self.size
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -54,10 +68,20 @@ class StaticResult:
             "hashes": {"md5": self.md5, "sha1": self.sha1, "sha256": self.sha256},
             "filetype": self.filetype,
             "entropy": round(self.entropy, 4),
-            "high_entropy": self.entropy >= 7.2,
+            "high_entropy": self.high_entropy,
+            "high_entropy_cutoff": self.high_entropy_cutoff,
+            "entropy_block": self.entropy_block,
+            "entropy_windows": [
+                {"offset": i * self.entropy_block, "entropy": round(e, 3)}
+                for i, e in enumerate(self.entropy_windows)
+            ],
+            "entropy_windows_truncated": self.entropy_windows_truncated,
+            "high_entropy_regions": self.high_entropy_regions(),
             "strings_sampled": len(self.strings),
             "pe": self.pe,
             "yara_matches": self.yara_matches,
+            "yara_details": self.yara_details,
+            "yara_errors": self.yara_errors,
         }
 
 
@@ -84,10 +108,41 @@ def shannon_entropy(data: bytes) -> float:
     return ent
 
 
-def _windowed_entropy(data: bytes, block: int) -> list[float]:
+def _windowed_entropy(data: bytes, block: int, max_windows: int) -> tuple[list[float], bool]:
+    """Entropy per fixed-size window. Returns (values, truncated)."""
     if block <= 0:
-        return []
-    return [shannon_entropy(data[i : i + block]) for i in range(0, len(data), block)][:512]
+        return [], False
+    starts = range(0, len(data), block)
+    truncated = max_windows > 0 and len(starts) > max_windows
+    if truncated:
+        starts = starts[:max_windows]
+    return [shannon_entropy(data[i : i + block]) for i in starts], truncated
+
+
+def high_entropy_regions(
+    windows: list[float], block: int, cutoff: float, size: int
+) -> list[dict[str, Any]]:
+    """Merge consecutive windows at/above ``cutoff`` into regions with byte offsets."""
+    regions: list[dict[str, Any]] = []
+    cur: dict[str, Any] | None = None
+    vals: list[float] = []
+    for i, e in enumerate(windows):
+        if e >= cutoff:
+            if cur is None:
+                cur = {"start": i * block}
+                vals = []
+            vals.append(e)
+            cur["end"] = min((i + 1) * block, size)
+        elif cur is not None:
+            cur.update(max_entropy=round(max(vals), 3), mean_entropy=round(sum(vals) / len(vals), 3))
+            regions.append(cur)
+            cur = None
+    if cur is not None:
+        cur.update(max_entropy=round(max(vals), 3), mean_entropy=round(sum(vals) / len(vals), 3))
+        regions.append(cur)
+    for r in regions:
+        r["length"] = r["end"] - r["start"]
+    return regions
 
 
 def _filetype(data: bytes, path: Path) -> str:
@@ -159,36 +214,111 @@ def _analyze_pe(data: bytes) -> dict[str, Any] | None:
     }
 
 
-def compile_rules(rules_dir: str | Path) -> Any | None:
+class RuleCompileError(RuntimeError):
+    """One or more YARA rule files failed to compile."""
+
+    def __init__(self, errors: list[str]):
+        self.errors = errors
+        super().__init__("YARA rule compilation failed:\n  " + "\n  ".join(errors))
+
+
+@dataclass
+class CompiledRules:
+    rules: Any | None
+    files: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+    available: bool = True
+
+
+def compile_rules(rules_dir: str | Path, on_error: str = "fail") -> CompiledRules:
+    """Compile every .yar/.yara file under ``rules_dir`` up front.
+
+    Each file is compiled on its own first so a syntax error is reported with its file
+    name and line. ``on_error="fail"`` raises RuleCompileError; ``on_error="warn"`` skips
+    the broken files (recording the errors) and compiles the rest. A missing directory or
+    a missing yara module is reported, never silently ignored.
+    """
+    if on_error not in ("fail", "warn"):
+        raise ValueError(f"yara on_error must be 'fail' or 'warn', got {on_error!r}")
     if yara is None:
-        return None
+        return CompiledRules(None, errors=["yara-python is not installed; YARA scanning disabled"], available=False)
     rules_dir = Path(rules_dir)
-    files = {p.stem: str(p) for p in rules_dir.glob("*.yar")}
-    files.update({p.stem: str(p) for p in rules_dir.glob("*.yara")})
-    if not files:
-        return None
+    if not rules_dir.is_dir():
+        err = f"rules directory not found: {rules_dir}"
+        if on_error == "fail":
+            raise RuleCompileError([err])
+        return CompiledRules(None, errors=[err])
+
+    paths = sorted([*rules_dir.rglob("*.yar"), *rules_dir.rglob("*.yara")])
+    good: dict[str, str] = {}
+    errors: list[str] = []
+    for p in paths:
+        ns = p.relative_to(rules_dir).with_suffix("").as_posix().replace("/", "_")
+        try:
+            yara.compile(filepath=str(p))
+        except yara.SyntaxError as e:
+            errors.append(f"{p}: {e}")
+            continue
+        except yara.Error as e:
+            errors.append(f"{p}: {e}")
+            continue
+        good[ns] = str(p)
+
+    if errors and on_error == "fail":
+        raise RuleCompileError(errors)
+    if not good:
+        return CompiledRules(None, files=[], errors=errors)
     try:
-        return yara.compile(filepaths=files)
-    except Exception:
-        return None
+        compiled = yara.compile(filepaths=good)
+    except yara.Error as e:  # e.g. duplicate rule identifiers across files
+        errs = [*errors, f"{rules_dir}: {e}"]
+        if on_error == "fail":
+            raise RuleCompileError(errs) from e
+        return CompiledRules(None, files=[], errors=errs)
+    return CompiledRules(compiled, files=sorted(good.values()), errors=errors)
 
 
-def _yara_scan(data: bytes, rules: Any | None) -> list[str]:
+def _yara_scan(data: bytes, rules: Any | None) -> tuple[list[dict[str, Any]], list[str]]:
+    if isinstance(rules, CompiledRules):
+        rules = rules.rules
     if rules is None:
-        return []
+        return [], []
     try:
-        return [str(m.rule) for m in rules.match(data=data, timeout=60)]
-    except Exception:
-        return []
+        matches = rules.match(data=data, timeout=60)
+    except Exception as e:  # noqa: BLE001 - surface, don't swallow
+        return [], [f"yara scan error: {e}"]
+    out = []
+    for m in matches:
+        meta = dict(getattr(m, "meta", {}) or {})
+        out.append(
+            {
+                "rule": str(m.rule),
+                "namespace": str(getattr(m, "namespace", "")),
+                "tags": list(getattr(m, "tags", []) or []),
+                "severity": str(meta.get("severity", "unknown")).lower(),
+                "description": str(meta.get("description", "")),
+            }
+        )
+    return out, []
 
 
 def analyze_file(path: str | Path, cfg, rules: Any | None = None) -> StaticResult:
     path = Path(path)
-    data = path.read_bytes()
+    return analyze_bytes(path.read_bytes(), path, cfg, rules=rules)
+
+
+def analyze_bytes(data: bytes, path: str | Path, cfg, rules: Any | None = None) -> StaticResult:
+    path = Path(path)
     md5, sha1, sha256 = _hashes(data)
     min_len = int(cfg.get("static", "string_min_len", default=5))
     limit = int(cfg.get("static", "max_strings", default=2000))
-    block = int(cfg.get("static", "entropy_block", default=256))
+    block = int(cfg.get("static", "entropy_block", default=1024))
+    cutoff = float(cfg.get("static", "high_entropy_cutoff", default=7.2))
+    max_windows = int(cfg.get("static", "max_entropy_windows", default=4096))
+    windows, truncated = _windowed_entropy(data, block, max_windows)
+    yara_details, yara_errors = _yara_scan(data, rules)
+    if isinstance(rules, CompiledRules):
+        yara_errors = [*rules.errors, *yara_errors]
     return StaticResult(
         path=str(path),
         size=len(data),
@@ -197,8 +327,13 @@ def analyze_file(path: str | Path, cfg, rules: Any | None = None) -> StaticResul
         sha256=sha256,
         filetype=_filetype(data, path),
         entropy=shannon_entropy(data),
-        entropy_windows=_windowed_entropy(data, block),
+        entropy_windows=windows,
+        entropy_windows_truncated=truncated,
         strings=extract_strings(data, min_len, limit),
         pe=_analyze_pe(data),
-        yara_matches=_yara_scan(data, rules),
+        yara_matches=[d["rule"] for d in yara_details],
+        yara_details=yara_details,
+        yara_errors=yara_errors,
+        high_entropy_cutoff=cutoff,
+        entropy_block=block,
     )
